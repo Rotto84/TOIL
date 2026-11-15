@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>TOIL Tracker</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--tx:#1d2330;--mu:#667085;--bd:#e3e6eb;--ac:#2557d6;--ok:#157f3b;--bad:#b42318}
+@media(prefers-color-scheme:dark){:root{--bg:#14171d;--card:#1d2129;--tx:#e8eaee;--mu:#98a2b3;--bd:#2d333d;--ac:#6b93f5;--ok:#4cc27a;--bad:#f0746a}}
+body{margin:0;font:15px system-ui,sans-serif;background:var(--bg);color:var(--tx)}
+header{display:flex;gap:16px;align-items:center;padding:12px 20px;background:var(--card);border-bottom:1px solid var(--bd);flex-wrap:wrap}
+header b{font-size:17px}nav{display:flex;gap:4px;flex:1;flex-wrap:wrap}
+button,input,select{font:inherit;color:inherit;background:var(--card);border:1px solid var(--bd);border-radius:6px;padding:6px 10px}
+button{cursor:pointer}button.p{background:var(--ac);border-color:var(--ac);color:#fff}button.on{border-color:var(--ac);color:var(--ac)}
+button.d{color:var(--bad)}main{max-width:960px;margin:20px auto;padding:0 16px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:10px;padding:16px;margin-bottom:16px}
+.card h3{margin:0 0 10px}.bal{font-size:32px;font-weight:700}.mu{color:var(--mu)}
+form{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:8px;align-items:end}
+form .w{grid-column:1/-1}label{display:flex;flex-direction:column;gap:3px;font-size:12px;color:var(--mu)}
+.tbl{overflow-x:auto}table{width:100%;border-collapse:collapse}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--bd);vertical-align:top}
+.e{color:var(--ok)}.t{color:var(--bad)}.err{color:var(--bad);margin:6px 0}
+.chip{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--bd);border-radius:99px;padding:2px 10px;margin:2px;font-size:13px}
+.chip a{cursor:pointer;color:var(--bad)}.row{margin:10px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+</style></head><body>
+<div id="app"></div>
+<script>
+const $=s=>document.querySelector(s), esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const api=async(m,u,b)=>{const r=await fetch(u,{method:m,headers:{'Content-Type':'application/json'},body:b?JSON.stringify(b):undefined});
+  const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.statusText);return j};
+let ME,tab='mine',eu=null,P=null,editing=null,err='',tid=null,scope=null;
+const today=()=>new Date().toISOString().slice(0,10), fmt=n=>(+n).toFixed(2).replace(/\.?0+$/,'')||'0', nm=u=>u.name||u.email;
+const act=async(m,u,b)=>{try{await api(m,u,b)}catch(e){alert(e.message)}render()};
+
+async function boot(){ try{ME=await api('GET','/api/me')}catch{await loginPage();return} render() }
+async function loginPage(){
+  const o=await fetch('/api/auth-options').then(r=>r.json());
+  $('#app').innerHTML=`<main style="max-width:380px"><div class="card"><h2 style="margin-top:0">TOIL Tracker</h2>
+  ${o.azure?'<a href="/login"><button class="p" style="width:100%">Sign in with Microsoft</button></a>':''}
+  ${o.azure&&o.local?'<p class="mu" style="text-align:center">or</p>':''}
+  ${o.local?`<form onsubmit="localLogin(event)" style="grid-template-columns:1fr"><label>Email<input type="email" name="email" required autocomplete="username"></label>
+  <label>Password<input type="password" name="password" required autocomplete="current-password"></label><button class="p">Sign in</button></form>`:''}
+  <div class="err">${esc(err)}</div></div></main>`;
+}
+async function localLogin(ev){ev.preventDefault();err='';
+  try{await api('POST','/auth/local',Object.fromEntries(new FormData(ev.target)));boot();return}catch(e){err=e.message}loginPage()}
+async function chpw(){const c=prompt('Current password');if(c===null)return;const n=prompt('New password (min 10 characters)');if(n===null)return;
+  try{await api('POST','/api/me/password',{current:c,password:n});alert('Password updated')}catch(e){alert(e.message)}}
+const go=t=>{tab=t;eu=null;P=null;editing=null;err='';render()};
+async function render(){
+  ME=await api('GET','/api/me');
+  const tabs=[['mine','My TOIL'],...(ME.is_manager?[['team','Teams']]:[]),['reports','Reports'],...(ME.role==='admin'?[['admin','Admin']]:[])];
+  $('#app').innerHTML=`<header><b>TOIL Tracker</b><nav>${tabs.map(([k,l])=>`<button class="${tab===k?'on':''}" onclick="go('${k}')">${l}</button>`).join('')}</nav>
+  <span class="mu">${esc(nm(ME))}</span>${ME.has_password?'<button onclick="chpw()">Change password</button>':''}<a href="/logout"><button>Sign out</button></a></header><main id="m"></main>`;
+  try{await({mine:()=>person(ME.id,nm(ME)),team,reports,admin}[tab]())}catch(e){$('#m').innerHTML=`<div class="err">${esc(e.message)}</div>`}
+}
+
+// ---- One person's entries + audit history (own, or a manager correcting on their behalf) ----
+const dsc=a=>{const b=a.before&&JSON.parse(a.before),n=a.after&&JSON.parse(a.after);
+  if(a.action==='create')return `Added ${n.type} ${fmt(n.hours)}h on ${n.date}${n.reason?': '+n.reason:''}`;
+  if(a.action==='delete')return `Deleted ${b.type} ${fmt(b.hours)}h on ${b.date}${b.reason?': '+b.reason:''}`;
+  return 'Changed '+['date','hours','type','reason'].filter(k=>b[k]!==n[k]).map(k=>`${k}: ${b[k]} → ${n[k]}`).join(', ')};
+let cache=[];
+async function person(uid,name){
+  const base=`/api/people/${uid}`,own=uid===ME.id;
+  const [list,hist]=await Promise.all([api('GET',base+'/entries'),api('GET',base+'/audit')]);cache=list;
+  const bal=list.reduce((a,e)=>a+(e.type==='earned'?e.hours:-e.hours),0);
+  const x=list.find(e=>e.id===editing)||{date:today(),hours:'',type:'earned',reason:''};
+  $('#m').innerHTML=`${own?'':'<button onclick="P=null;editing=null;render()">← Back to team</button><div class="row"></div>'}
+  <div class="card"><div class="mu">${own?'Your':esc(name)+'’s'} balance (hours)</div><div class="bal">${fmt(bal)}</div></div>
+  <div class="card"><h3>${editing?'Edit entry':'Add time'}${own?'':' <span class="mu">(correction: recorded in the audit trail)</span>'}</h3>
+  <form onsubmit="save(event,${uid})" ${editing?'data-edit="1"':''}>
+  <label>Type<select name="type" onchange="typeChg(this.form)"><option value="earned" ${x.type==='earned'?'selected':''}>Earned (banked)</option><option value="taken" ${x.type==='taken'?'selected':''}>Taken (time off)</option></select></label>
+  <label>Date<input type="date" name="date" value="${x.date}" min="2026-01-01" max="2100-12-31" required></label>
+  <label class="tk" style="${x.type==='taken'&&!editing?'':'display:none'}">To (for several days)<input type="date" name="to" min="2026-01-01" max="2100-12-31"></label>
+  <label>Hours <span class="tk" style="${x.type==='taken'&&!editing?'':'display:none'}">per day</span><input type="number" name="hours" step="0.25" min="0.25" max="24" value="${x.hours}" required></label>
+  <label class="tk" style="flex-direction:row;align-items:center;gap:6px;${x.type==='taken'&&!editing?'':'display:none'}"><input type="checkbox" name="skip" checked> Skip weekends</label>
+  <label class="w">Reason <span class="rq">${x.type==='taken'?'(optional)':''}</span><input name="reason" value="${esc(x.reason)}" placeholder="e.g. Weekend release deployment" ${x.type==='earned'?'required':''}></label>
+  ${own?'':'<label class="w">Note: why are you making this change?<input name="note" required></label>'}
+  <div class="w"><button class="p">${editing?'Update':'Add'}</button> ${editing?'<button type="button" onclick="editing=null;render()">Cancel</button>':''}</div></form><div class="err">${esc(err)}</div></div>
+  <div class="card tbl"><table><tr><th>Date</th><th>Type</th><th>Hours</th><th>Reason</th><th></th></tr>`+
+  (list.map(e=>`<tr><td>${e.date}</td><td class="${e.type==='earned'?'e':'t'}">${e.type}</td><td>${fmt(e.hours)}</td><td>${esc(e.reason)}</td>
+   <td><button onclick="editing=${e.id};render()">Edit</button> <button class="d" onclick="del(${uid},${e.id})">Delete</button></td></tr>`).join('')||'<tr><td colspan="5" class="mu">No entries yet</td></tr>')+
+  `</table></div><div class="card tbl"><h3>History (audit trail)</h3><table><tr><th>When (UTC)</th><th>By</th><th>Change</th><th>Note</th></tr>`+
+  (hist.map(a=>`<tr><td>${a.at}</td><td>${esc(a.actor_name||a.actor_email)}${a.actor_id!==uid?' <span class="mu">(on behalf)</span>':''}</td><td>${esc(dsc(a))}</td><td>${esc(a.note||'')}</td></tr>`).join('')||'<tr><td colspan="4" class="mu">No recorded changes yet</td></tr>')+'</table></div>';
+}
+function typeChg(f){const tk=f.type.value==='taken';f.reason.required=!tk;f.querySelector('.rq').textContent=tk?'(optional)':'';
+  f.querySelectorAll('.tk').forEach(e=>e.style.display=(tk&&!f.dataset.edit)?'':'none');if(tk&&!f.hours.value)f.hours.value=8}
+async function save(ev,uid){ev.preventDefault();const f=Object.fromEntries(new FormData(ev.target));f.hours=+f.hours;err='';
+  try{const b=`/api/people/${uid}/entries`;
+    if(editing)await api('PUT',b+'/'+editing,f);
+    else if(f.type==='taken')await api('POST',b+'/range',{from:f.date,to:f.to||f.date,hours:f.hours,reason:f.reason,note:f.note,skip_weekends:!!f.skip});
+    else await api('POST',b,f);
+    editing=null}catch(e){err=e.message}render()}
+async function del(uid,id){let note;if(uid!==ME.id){note=prompt('Why are you deleting this entry? (recorded in the audit trail)');if(!note)return}
+  else if(!confirm('Delete this entry?'))return;await act('DELETE',`/api/people/${uid}/entries/${id}`,{note})}
+
+// ---- Teams (managers/directors/admins) ----
+function openP(i){const u=window._s[i];P={id:u.id,name:nm(u)};render()}
+async function team(){
+  if(P)return person(P.id,P.name);
+  const ts=await api('GET','/api/teams');
+  if(!ts.length){$('#m').innerHTML='<div class="card mu">You don’t manage any teams yet.</div>';return}
+  if(!ts.some(t=>t.id===tid))tid=ts[0].id;
+  const t=ts.find(t=>t.id===tid),s=window._s=await api('GET',`/api/teams/${tid}/summary`);
+  $('#m').innerHTML=`<div class="card"><select onchange="tid=+this.value;render()">${ts.map(x=>`<option value="${x.id}" ${x.id===tid?'selected':''}>${esc(x.name)}</option>`).join('')}</select>
+  <div class="mu row">Managers: ${t.managers.map(m=>esc(nm(m))+' ('+m.title+')').join(', ')||'none'}</div></div>
+  <div class="card tbl"><table><tr><th>Name</th><th>Earned</th><th>Taken</th><th>Balance</th><th></th></tr>`+
+  (s.map((u,i)=>`<tr><td>${esc(nm(u))}</td><td>${fmt(u.earned)}</td><td>${fmt(u.taken)}</td><td><b>${fmt(u.balance)}</b></td><td><button onclick="openP(${i})">View / correct</button></td></tr>`).join('')||'<tr><td colspan="5" class="mu">No members in this team</td></tr>')+'</table></div>';
+}
+
+// ---- Reports (simple SVG charts) ----
+const W=640,H=180,PAD=34;
+const barsM=ms=>{const mx=Math.max(1,...ms.flatMap(m=>[m.earned,m.taken])),bw=(W-PAD)/ms.length;
+  return `<svg viewBox="0 0 ${W} ${H+24}" width="100%" role="img" aria-label="Earned and taken hours per month"><text x="0" y="10" font-size="10" fill="var(--mu)">${fmt(mx)}h</text>`+ms.map((m,i)=>{const x=PAD+i*bw,a=m.earned/mx*H,b=m.taken/mx*H;
+  return `<rect x="${x+3}" y="${H-a}" width="${bw/2-4}" height="${a}" fill="var(--ok)" opacity="${m.future?.5:1}"><title>${m.m}${m.future?' (upcoming)':''} earned ${fmt(m.earned)}h</title></rect><rect x="${x+bw/2}" y="${H-b}" width="${bw/2-4}" height="${b}" fill="var(--bad)" opacity="${m.future?.5:1}"><title>${m.m}${m.future?' (upcoming)':''} taken ${fmt(m.taken)}h</title></rect><text x="${x+bw/2}" y="${H+16}" font-size="10" text-anchor="middle" fill="var(--mu)">${m.m.slice(2)}</text>`}).join('')+'</svg>'};
+const lineB=ms=>{
+  const v=ms.map(m=>m.balance);let mx=Math.max(0,...v),mn=Math.min(0,...v);
+  const step=[1,2,4,8,10,20,40,80,100,200,400,800].find(x=>x>=((mx-mn)||1)/4)||1000;
+  mx=Math.ceil(mx/step)*step;mn=Math.floor(mn/step)*step;if(mx===mn)mx=mn+step;
+  const T=30,sy=y=>T+(mx-y)/(mx-mn)*H,bw=(W-PAD)/ms.length,X=i=>PAD+i*bw+bw/2,cur=Math.max(0,ms.filter(m=>!m.future).length-1),many=ms.length>12;
+  let g='';for(let t=mn;t<=mx;t+=step)g+=`<line x1="${PAD}" x2="${W}" y1="${sy(t)}" y2="${sy(t)}" stroke="var(--bd)" ${t===0?'':'stroke-dasharray="3 3"'}/><text x="${PAD-5}" y="${sy(t)+3}" font-size="10" text-anchor="end" fill="var(--mu)">${t}h</text>`;
+  return `<svg viewBox="0 0 ${W} ${H+T+22}" width="100%" role="img" aria-label="Remaining hours at the end of each month">${g}
+  <line x1="${X(cur)}" x2="${X(cur)}" y1="14" y2="${T+H}" stroke="var(--mu)" stroke-dasharray="4 3"/><text x="${X(cur)}" y="10" font-size="10" text-anchor="middle" fill="var(--mu)">Today</text>
+  <polyline points="${v.map((y,i)=>X(i)+','+sy(y)).join(' ')}" fill="none" stroke="var(--ac)" stroke-width="2"/>`+ms.map((m,i)=>{
+    const y=m.balance,c=y<0?'var(--bad)':'var(--ac)',show=!many||i===0||i===ms.length-1||y!==ms[i-1].balance;
+    return `<circle cx="${X(i)}" cy="${sy(y)}" r="3.5" fill="${m.future?'var(--card)':c}" stroke="${c}" stroke-width="2"><title>${m.m}${m.future?' (upcoming)':''}: ${fmt(y)}h remaining</title></circle>${show?`<text x="${X(i)}" y="${sy(y)-8}" font-size="10" text-anchor="middle" fill="${y<0?'var(--bad)':'var(--tx)'}">${fmt(y)}h</text>`:''}<text x="${X(i)}" y="${T+H+16}" font-size="10" text-anchor="middle" fill="var(--mu)">${m.m.slice(2)}</text>`}).join('')+'</svg>'};
+const barsP=ps=>{const mx=Math.max(1,...ps.map(p=>Math.abs(p.balance))),L=160,r=26;
+  return `<svg viewBox="0 0 ${W} ${ps.length*r+4}" width="100%" role="img" aria-label="Balance per person">`+ps.map((p,i)=>`<text x="0" y="${i*r+17}" font-size="12" fill="var(--tx)">${esc(p.name.slice(0,22))}</text><rect x="${L}" y="${i*r+4}" width="${Math.abs(p.balance)/mx*(W-L-60)}" height="16" fill="${p.balance<0?'var(--bad)':'var(--ac)'}"/><text x="${L+Math.abs(p.balance)/mx*(W-L-60)+6}" y="${i*r+17}" font-size="12" fill="var(--mu)">${fmt(p.balance)}h</text>`).join('')+'</svg>'};
+async function reports(){
+  const ts=await api('GET','/api/teams');if(!scope)scope='u:'+ME.id;
+  const [k,id]=scope.split(':'),r=await api('GET',`/api/reports?${k==='t'?'team_id':'user_id'}=${id}&today=${today()}`);
+  $('#m').innerHTML=`<div class="card"><label>Show report for<select onchange="scope=this.value;render()"><option value="u:${ME.id}" ${scope==='u:'+ME.id?'selected':''}>Me</option>`+
+   ts.map(t=>`<optgroup label="${esc(t.name)}"><option value="t:${t.id}" ${scope==='t:'+t.id?'selected':''}>Whole team</option>`+t.members.filter(m=>m.id!==ME.id).map(m=>`<option value="u:${m.id}" ${scope==='u:'+m.id?'selected':''}>${esc(nm(m))}</option>`).join('')+'</optgroup>').join('')+`</select></label></div>
+  <div class="grid"><div class="card"><div class="mu">Remaining today</div><div class="bal ${r.total.bal_today<0?'t':''}">${fmt(r.total.bal_today)}h</div></div><div class="card"><div class="mu">Booked upcoming</div><div class="bal t">${fmt(r.total.upcoming)}h</div></div><div class="card"><div class="mu">Left after booked time off</div><div class="bal ${r.total.balance<0?'t':''}">${fmt(r.total.balance)}h</div></div><div class="card"><div class="mu">Total earned</div><div class="bal e">${fmt(r.total.earned)}h</div></div><div class="card"><div class="mu">Total taken</div><div class="bal t">${fmt(r.total.taken)}h</div></div></div>
+  <div class="card"><h3>Earned vs taken per month <span class="mu">(<span class="e">■</span> earned <span class="t">■</span> taken · faded = upcoming)</span></h3>${barsM(r.months)}</div>
+  <div class="card"><h3>Remaining hours at the end of each month <span class="mu">(hollow = upcoming, red = below zero)</span></h3>${lineB(r.months)}</div>
+  <div class="card tbl"><h3>Month by month</h3><table><tr><th>Month</th><th>Earned</th><th>Taken</th><th>Remaining at month end</th></tr>${r.months.filter((m,i,a)=>m.earned||m.taken||(!m.future&&(a[i+1]||{future:1}).future)).map(m=>`<tr><td>${m.m}${m.future?' <span class="mu">(upcoming)</span>':''}</td><td class="e">${fmt(m.earned)}h</td><td class="t">${fmt(m.taken)}h</td><td><b class="${m.balance<0?'t':''}">${fmt(m.balance)}h</b></td></tr>`).join('')}</table></div>
+  ${k==='t'?`<div class="card"><h3>Balance by person</h3>${barsP(r.people.sort((a,b)=>b.balance-a.balance))}</div>
+  <div class="card tbl"><h3>Remaining hours by person</h3><table><tr><th>Name</th><th>Remaining today</th><th>Upcoming booked</th><th>Left after booked time off</th></tr>${r.people.map(p=>`<tr><td>${esc(p.name)}</td><td>${fmt(p.bal_today)}h</td><td class="t">${fmt(p.upcoming)}h</td><td><b class="${p.balance<0?'t':''}">${fmt(p.balance)}h</b></td></tr>`).join('')}</table></div>`:''}`;
+}
+
+// ---- Admin: teams and users ----
+const LV={member:'Teammate',lead:'Team lead',director:'Director',admin:'Admin'};
+const userForm=(u,ts)=>`<form onsubmit="${u?`saveUser(event,${u.id})`:'addUser(event)'}">
+  <label class="w">Work email<input type="email" name="email" value="${esc(u?u.email:'')}" ${u?'readonly':'required'}></label>
+  <label class="w">Full name<input name="uname" value="${esc(u?u.name||'':'')}" placeholder="e.g. Jane Smith"></label>
+  <label>Role<select name="level" onchange="this.form.querySelector('.tg').style.display=this.value==='admin'?'none':''">${Object.entries(LV).map(([k,l])=>`<option value="${k}" ${u&&u.level===k?'selected':''}>${l}</option>`).join('')}</select></label>
+  <div class="w tg" ${u&&u.level==='admin'?'style="display:none"':''}><div class="mu" style="font-size:12px;margin-bottom:4px">Team(s) — teammates belong to them, leads and directors manage them</div>
+   ${ts.map(t=>`<label class="chip" style="flex-direction:row;color:var(--tx)"><input type="checkbox" name="t" value="${t.id}" ${u&&u.teams.some(x=>x.id===t.id)?'checked':''}> ${esc(t.name)}</label>`).join('')||'<span class="mu">Create a team first</span>'}</div>
+  ${u?'':'<label class="w">Initial password (optional, enables local login)<input type="password" name="password" minlength="10" autocomplete="new-password"></label>'}
+  <div class="w"><button class="p">${u?'Save':'Add user'}</button> ${u?'<button type="button" onclick="eu=null;render()">Cancel</button>':''}</div></form>`;
+const lvl=ev=>({name:ev.target.elements.uname.value,level:ev.target.level.value,team_ids:[...ev.target.querySelectorAll('input[name=t]:checked')].map(c=>+c.value)});
+async function admin(){
+  const [u,ts,st]=await Promise.all([api('GET','/api/users'),api('GET','/api/teams'),api('GET','/api/settings')]);const e=u.find(x=>x.id===eu);window._ts=ts;
+  $('#m').innerHTML=`<div class="card"><h3>Settings</h3><label style="flex-direction:row;align-items:center;gap:8px;color:var(--tx);font-size:15px"><input type="checkbox" ${st.allow_negative?'checked':''} onchange="act('PUT','/api/settings',{allow_negative:this.checked})"> Allow negative balances</label>
+  <div class="mu" style="margin-top:6px">When off, nobody can take time off (or make a change) that would push their balance below zero. People already below zero can still add earned time or remove time off to recover.</div></div>
+  <div class="card"><h3>Teams</h3><form onsubmit="newTeam(event)"><label class="w">New team name<input name="name" required></label><button class="p">Create team</button></form><div class="err">${esc(err)}</div>
+  <div class="tbl"><table>`+(ts.map(t=>`<tr><td><b>${esc(t.name)}</b></td><td class="mu">${t.members.length} teammate(s) · managers: ${t.managers.map(m=>esc(nm(m))+' ('+m.title+')').join(', ')||'none'}</td>
+   <td><button class="d" onclick="delTeam(${t.id})">Delete</button></td></tr>`).join('')||'<tr><td class="mu">No teams yet</td></tr>')+`</table></div></div>
+  <div class="card"><h3>${e?'Edit '+esc(nm(e)):'Add user'}</h3>${userForm(e,ts)}</div>
+  <div class="card tbl"><h3>Users</h3><table><tr><th>User</th><th>Role</th><th>Teams</th><th></th></tr>`+u.map(x=>`<tr><td>${esc(x.name||'')}<div class="mu">${esc(x.email)}</div></td><td>${LV[x.level]}</td>
+  <td>${x.level==='admin'?'<span class="mu">All teams</span>':x.teams.map(t=>`<span class="chip">${esc(t.name)}</span>`).join('')||'<span class="mu">none</span>'}</td>
+  <td><button onclick="eu=${x.id};scrollTo(0,0);render()">Edit</button> <button onclick="resetPw(${x.id})">${x.has_password?'Reset':'Set'} password</button> ${x.id===ME.id?'':`<button class="d" onclick="if(confirm('Remove this user? Their history is kept.'))act('DELETE','/api/users/${x.id}')">Remove</button>`}</td></tr>`).join('')+'</table></div>';
+}
+function delTeam(id){const t=window._ts.find(x=>x.id===id);if(t&&confirm('Delete team '+t.name+'? Entries are kept.'))act('DELETE','/api/teams/'+id)}
+async function newTeam(ev){ev.preventDefault();err='';try{await api('POST','/api/teams',Object.fromEntries(new FormData(ev.target)))}catch(e){err=e.message}render()}
+async function addUser(ev){ev.preventDefault();err='';const f=ev.target;
+  try{await api('POST','/api/users',{email:f.email.value,password:f.password.value,...lvl(ev)})}catch(e){err=e.message}render()}
+async function saveUser(ev,id){ev.preventDefault();try{await api('PUT',`/api/users/${id}/access`,lvl(ev));eu=null}catch(e){alert(e.message)}render()}
+async function resetPw(id){const p=prompt('New password (min 10 characters)');if(p===null)return;
+  try{await api('POST','/api/users/'+id+'/password',{password:p});alert('Password set');render()}catch(e){alert(e.message)}}
+boot();
+</script></body></html>

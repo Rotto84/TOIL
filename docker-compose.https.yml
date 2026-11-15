@@ -1,0 +1,30 @@
+# TOIL Tracker + Caddy (HTTPS). Only Caddy is published; the app itself is not reachable directly.
+# Needs in .env: BASE_URL=https://<TOIL_HOST>, TOIL_HOST=<hostname or IP>, TRUST_PROXY=1 and your other settings.
+services:
+  toil:
+    image: toil-tracker:latest
+    container_name: toil-tracker
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - toil-data:/data
+  caddy:
+    image: caddy:2
+    container_name: toil-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      TOIL_HOST: ${TOIL_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - toil
+volumes:
+  toil-data:
+    name: toil-data   # reuses the volume your existing install already uses
+  caddy-data:
+  caddy-config:

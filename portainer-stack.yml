@@ -1,0 +1,22 @@
+services:
+  toil:
+    image: ${TOIL_IMAGE:-toil-tracker:latest}
+    container_name: toil-tracker
+    restart: unless-stopped
+    ports:
+      - "${HOST_PORT:-3000}:3000"
+    environment:
+      BASE_URL: ${BASE_URL}
+      SESSION_SECRET: ${SESSION_SECRET}
+      ADMIN_EMAILS: ${ADMIN_EMAILS}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      AUTH_LOCAL: ${AUTH_LOCAL:-true}
+      AUTH_AZURE: ${AUTH_AZURE:-false}
+      TENANT_ID: ${TENANT_ID:-}
+      CLIENT_ID: ${CLIENT_ID:-}
+      CLIENT_SECRET: ${CLIENT_SECRET:-}
+    volumes:
+      - toil-data:/data
+
+volumes:
+  toil-data:

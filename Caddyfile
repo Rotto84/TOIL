@@ -1,0 +1,9 @@
+# HTTPS reverse proxy for TOIL Tracker.
+# {$TOIL_HOST} is a hostname or IP address. "tls internal" uses Caddy's own certificate authority, which is right for a
+# private network; browsers show a warning until you trust Caddy's root certificate (see README).
+# For a public domain with real DNS, delete the "tls internal" line and Caddy will get a Let's Encrypt certificate.
+{$TOIL_HOST} {
+	tls internal
+	encode gzip
+	reverse_proxy toil:3000
+}
