@@ -43,14 +43,17 @@ A small internal web application for tracking **TOIL (Time Off In Lieu)**: hours
 **Corrections and audit trail**
 - Managers and admins can add, edit or delete a team member's entries. A **note explaining the change is mandatory**.
 - Every entry create, edit and delete (including people's own) is recorded with who, when, before/after values and the note. Owners and their managers see this on the **History** panel. Audit rows are never deleted by the application.
+- **Admin activity log** (Admin tab): users added, changed or removed, role and team changes, password resets, Microsoft account links, team creation/deletion and settings changes are recorded with who and when. Passwords are never logged.
 
 **Reports** (browser-based, no external services)
 - Tiles: *Remaining today*, *Booked upcoming*, *Left after booked time off*, *Total earned*, *Total taken*.
 - Charts: earned vs taken per month, and remaining hours at the end of each month (projected into upcoming months, with a "Today" marker).
 - Month-by-month table, and a per-person remaining-hours table for team reports.
 - Managers choose a whole team or an individual; teammates see their own report.
+- **Yearly report** (own tab): pick a calendar year and a person or team. It shows the opening balance on 1 January (carried over from earlier years), hours earned and taken, booked future time off, the closing balance on 31 December, month-by-month charts and table, a per-person table for teams, and every entry with its reason. Download it as **CSV** (spreadsheet-safe: text cells that start with `=`, `+`, `-` or `@` are neutralised) or use **Print / save as PDF**, which hides the navigation and uses a print layout.
 
 **Admin settings**
+- **Branding:** admins set the application name and upload a logo (PNG, JPEG or WebP, up to 512 KB) from the Admin tab. They appear on the login screen, in the header and in the browser tab. SVG logos are refused because they can carry script and the login page is public. The logo is stored in the database, so it is included in backups.
 - **Allow negative balances** (default on). When off, any change that would push someone's balance below zero is blocked, including time off, edits and deletion of earned time already used. People already below zero can still recover by adding earned time or removing time off.
 
 **Sign-in**
@@ -198,7 +201,8 @@ All configuration is by environment variables (`.env` file, `--env-file`, or Por
 5. The app requests only the `openid`, `profile` and `email` scopes (no extra API permissions or admin consent needed).
 6. **MFA:** the application does not prompt for MFA itself. Create a **Conditional Access policy** targeting this application with *Require multifactor authentication*. All Entra sign-ins then follow your tenant policy.
 7. Optional: on the matching **Enterprise application**, enable *Assignment required* to restrict who can authenticate at all.
-8. Users are matched by **email / user principal name**. An admin must add each person in TOIL Tracker using the same address they sign in to Microsoft with.
+8. Users are matched by **email / user principal name** on their first sign-in. An admin must add each person in TOIL Tracker using the same address they sign in to Microsoft with. At that first sign-in the person's immutable Microsoft **object ID** is stored against their account, and from then on the account is recognised by that ID, so a re-used or renamed email/UPN cannot take over someone's TOIL account. If someone's Microsoft account is recreated, an admin uses **Unlink Microsoft** on the Users list so the new account can link.
+9. Sign-in uses the authorisation-code flow with a random `state` value and PKCE (S256), and the tenant ID in the token is checked against `TENANT_ID` when that is a directory GUID.
 
 > Local email/password accounts do **not** go through Entra, so they **bypass MFA**. Use them only where Entra is not possible (for example a break-glass admin), or disable them with `AUTH_LOCAL=false`.
 
@@ -212,7 +216,7 @@ All configuration is by environment variables (`.env` file, `--env-file`, or Por
 4. **Admin → Add user:** enter email, full name, role, and tick the team(s). For local login, set an initial password and tell the user to change it (Change password in the header).
    - *Teammate* belongs to the ticked teams; *Team lead* and *Director* manage them; *Admin* sees everything and needs no team.
    - Each person has one role, applied to all their selected teams.
-5. **Edit** on the Users list changes name, role and teams. **Remove** deactivates the account immediately (existing sessions stop working) but **keeps all history**. Re-adding the same email restores it.
+5. **Edit** on the Users list changes name, role and teams. **Unlink Microsoft** (shown for people who have signed in with Entra) clears the stored Microsoft account link. **Remove** deactivates the account immediately (existing sessions stop working) but **keeps all history**. Re-adding the same email restores it.
 6. **Settings → Allow negative balances** controls whether people can take more time than they have banked.
 
 ---
@@ -260,10 +264,14 @@ sudo docker start toil-tracker
 
 **In place**
 - All database queries are parameterised. Every route enforces permissions server-side, including access to other people's entries.
-- Passwords hashed with bcrypt (cost 12). Generic login errors and constant-time-style handling to avoid account enumeration.
+- Passwords hashed with bcrypt (cost 12) in a small pool of **worker threads**, so a flood of login attempts cannot stall the application; excess load is refused with HTTP 503. Generic login errors and dummy hashing for unknown accounts avoid account enumeration.
+- Strict server-side input validation: hours must be real numbers (max 2 decimals), dates must be real calendar dates in range, text fields have length limits, and malformed values are rejected with 400.
+- Every administrative action is written to the admin activity log; entry changes are written to the entry audit trail in the same database transaction as the change.
 - Login lockout over a 15-minute window: 5 failures per IP+email, 20 per email, 30 per IP.
 - Session cookie is `HttpOnly`, `SameSite=Lax`, `Secure` over https, 8-hour lifetime, regenerated at login. Removing a user ends their access immediately.
-- HSTS is sent when `BASE_URL` is https. Container runs as non-root. `.env` is excluded from the image.
+- Response headers: HSTS (when https), `Content-Security-Policy` (same-origin only for connections, forms, frames and objects; `X-Frame-Options: DENY`), `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, cross-origin isolation headers, `Cache-Control: no-store` on API and auth responses, and no `X-Powered-By`.
+- Entra sign-in uses `state` and PKCE and binds each person to their Microsoft object ID.
+- Container runs as non-root. `.env` is excluded from the image.
 - Node 24 LTS base image (Node 20 reached end-of-life in April 2026).
 
 **Operational requirements**
@@ -284,6 +292,9 @@ See [Known limitations](#11-known-limitations) for security items still open in 
 | "Not signed in" after login over http while `BASE_URL` is https | Browser reached the app over http. Use the https URL |
 | Entra error about redirect URI | The registered URI must exactly equal `<BASE_URL>/auth/callback` |
 | "Your account has not been added" after Entra login | Admin has not added that email/UPN in the Users tab |
+| "Server busy. Please try again shortly." (HTTP 503) | Many password checks arrived at once and the queue was full. It clears by itself; repeated occurrences suggest a login flood, so check the source in the proxy logs |
+| "linked to a different Microsoft account" | The person's Microsoft account was recreated. An admin clicks **Unlink Microsoft** on their row, then the person signs in again |
+| "Sign-in session expired or invalid" | The Microsoft sign-in took longer than 10 minutes, was opened in another browser, or was replayed. Start again from the login page |
 | Too many attempts message | Lockout window (15 minutes) reached; wait, or restart the container to clear it |
 | Changes to the Dockerfile or code not visible | Image rebuilt but container not recreated. Remove and recreate the container |
 | Port already in use | Another service holds 80/443/3000. Check `sudo ss -tlnp` and change `HOST_PORT`/ports |
@@ -303,16 +314,16 @@ See [Known limitations](#11-known-limitations) for security items still open in 
 - One role per person across all their teams.
 - Date limits (2026–2100) are constants in `server.js` and the form fields.
 
-**Security items still open in this release** (from an internal code review; all are planned fixes)
-- Entry hours accept numeric strings (for example `"0x10"`), which can be stored as text and counted as zero, letting time off bypass the negative-balance rule. Impossible dates such as 31 Feb are accepted.
-- Administrative actions (role/team changes, password resets, user removal, settings changes) are not recorded in the audit trail; only entry changes are.
-- No Content-Security-Policy, `X-Frame-Options`, `X-Content-Type-Options` or `Referrer-Policy` headers; `X-Powered-By` is exposed.
-- Password checks are CPU-bound and run on the main thread, so a flood of login attempts can slow the app.
-- Entra sign-in does not validate the OAuth `state` parameter and identifies users by `preferred_username` rather than the immutable object ID.
-- `/logout` is a GET request; changing a password does not end other sessions; some unused admin endpoints remain exposed (admin-only).
-- Admins can set a local password for an Entra user, creating a sign-in path that bypasses MFA.
+**Security: remaining low-severity items** (from the internal code review; the medium-severity items were fixed)
+- The Content-Security-Policy still allows inline scripts, because the page uses inline event handlers. It blocks external connections, framing and form hijacking, but a full script lockdown would need the front end refactored.
+- `/logout` is a GET request, so a malicious page can sign a user out (no data is exposed).
+- Changing a password does not end the person's other sessions (removing a user does).
+- Admins can set a local password for an Entra user, creating a sign-in path that bypasses MFA. Set `AUTH_LOCAL=false` if you do not need local accounts.
+- Anyone listed in `ADMIN_EMAILS` is re-promoted and reactivated on every start. Remove people from that list when they stop being admins.
+- `npm audit` reports 2 moderate findings in `uuid` (a dependency of `msal-node`). They relate to a uuid API this application does not call directly; update `msal-node` when a release resolves them.
+- Passwords are hashed with bcrypt, which uses only the first 72 bytes of a password.
 
-Until these are closed, restrict network access to the corporate network or VPN.
+Restrict access to your corporate network or VPN where you can, and keep the base image and dependencies updated.
 
 ---
 
@@ -329,7 +340,7 @@ Until these are closed, restrict network access to the corporate network or VPN.
 - [ ] Container shows `Up (healthy)`; logs show no warnings
 - [ ] Backup scheduled, copied off-host, and a restore tested
 - [ ] Monitoring on `https://<host>/healthz` (for example Uptime Kuma)
-- [ ] Access restricted to corporate network/VPN while the open security items in section 11 remain
+- [ ] Access restricted to the corporate network/VPN where possible (see section 11 for the remaining low-severity items)
 
 ---
 
@@ -339,12 +350,14 @@ SQLite tables (created and migrated automatically at startup):
 
 | Table | Purpose |
 |---|---|
-| `users` | Email, name, role (`member` or `admin`), password hash (local login only), active flag |
+| `users` | Email, name, role (`member` or `admin`), password hash (local login only), linked Microsoft object ID, active flag |
 | `teams` | Team names |
 | `team_members` | Which users are teammates of which teams |
 | `team_managers` | Which users manage which teams, with title (`lead` or `director`) |
 | `entries` | TOIL records: user, date, hours, type (`earned`/`taken`), reason |
 | `audit` | Immutable history of entry changes: actor, owner, action, before/after JSON, note, UTC timestamp |
+| `admin_log` | History of administrative actions: actor, action, details (JSON, no secrets), UTC timestamp |
+| `branding` | The uploaded logo image (single row) |
 | `settings` | Admin settings (for example `allow_negative`) |
 | `sessions` | Login sessions (cookie-based, 8-hour expiry) |
 

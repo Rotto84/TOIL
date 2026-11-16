@@ -18,6 +18,7 @@ form .w{grid-column:1/-1}label{display:flex;flex-direction:column;gap:3px;font-s
 .e{color:var(--ok)}.t{color:var(--bad)}.err{color:var(--bad);margin:6px 0}
 .chip{display:inline-flex;gap:6px;align-items:center;border:1px solid var(--bd);border-radius:99px;padding:2px 10px;margin:2px;font-size:13px}
 .chip a{cursor:pointer;color:var(--bad)}.row{margin:10px 0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px}
+@media print{:root{--bg:#fff;--card:#fff;--tx:#000;--mu:#555;--bd:#ccc}header,.noprint{display:none!important}body{background:#fff}main{max-width:none;margin:0;padding:0}.card{break-inside:avoid}}
 </style></head><body>
 <div id="app"></div>
 <script>
@@ -28,10 +29,13 @@ let ME,tab='mine',eu=null,P=null,editing=null,err='',tid=null,scope=null;
 const today=()=>new Date().toISOString().slice(0,10), fmt=n=>(+n).toFixed(2).replace(/\.?0+$/,'')||'0', nm=u=>u.name||u.email;
 const act=async(m,u,b)=>{try{await api(m,u,b)}catch(e){alert(e.message)}render()};
 
-async function boot(){ try{ME=await api('GET','/api/me')}catch{await loginPage();return} render() }
+let BR={name:'TOIL Tracker',logo:null};
+async function loadBrand(){try{BR=await fetch('/api/branding').then(r=>r.json())}catch{}document.title=BR.name}
+const logoImg=h=>BR.logo?`<img src="${esc(BR.logo)}" alt="" style="max-height:${h}px;max-width:${h*4}px;vertical-align:middle">`:'';
+async function boot(){ await loadBrand(); try{ME=await api('GET','/api/me')}catch{await loginPage();return} render() }
 async function loginPage(){
   const o=await fetch('/api/auth-options').then(r=>r.json());
-  $('#app').innerHTML=`<main style="max-width:380px"><div class="card"><h2 style="margin-top:0">TOIL Tracker</h2>
+  $('#app').innerHTML=`<main style="max-width:380px"><div class="card"><div style="text-align:center;margin-bottom:14px">${logoImg(64)}<h2 style="margin:${BR.logo?'8px':'0'} 0 0">${esc(BR.name)}</h2></div>
   ${o.azure?'<a href="/login"><button class="p" style="width:100%">Sign in with Microsoft</button></a>':''}
   ${o.azure&&o.local?'<p class="mu" style="text-align:center">or</p>':''}
   ${o.local?`<form onsubmit="localLogin(event)" style="grid-template-columns:1fr"><label>Email<input type="email" name="email" required autocomplete="username"></label>
@@ -45,10 +49,10 @@ async function chpw(){const c=prompt('Current password');if(c===null)return;cons
 const go=t=>{tab=t;eu=null;P=null;editing=null;err='';render()};
 async function render(){
   ME=await api('GET','/api/me');
-  const tabs=[['mine','My TOIL'],...(ME.is_manager?[['team','Teams']]:[]),['reports','Reports'],...(ME.role==='admin'?[['admin','Admin']]:[])];
-  $('#app').innerHTML=`<header><b>TOIL Tracker</b><nav>${tabs.map(([k,l])=>`<button class="${tab===k?'on':''}" onclick="go('${k}')">${l}</button>`).join('')}</nav>
+  const tabs=[['mine','My TOIL'],...(ME.is_manager?[['team','Teams']]:[]),['reports','Reports'],['yearly','Yearly report'],...(ME.role==='admin'?[['admin','Admin']]:[])];
+  $('#app').innerHTML=`<header><b>${logoImg(28)} ${esc(BR.name)}</b><nav>${tabs.map(([k,l])=>`<button class="${tab===k?'on':''}" onclick="go('${k}')">${l}</button>`).join('')}</nav>
   <span class="mu">${esc(nm(ME))}</span>${ME.has_password?'<button onclick="chpw()">Change password</button>':''}<a href="/logout"><button>Sign out</button></a></header><main id="m"></main>`;
-  try{await({mine:()=>person(ME.id,nm(ME)),team,reports,admin}[tab]())}catch(e){$('#m').innerHTML=`<div class="err">${esc(e.message)}</div>`}
+  try{await({mine:()=>person(ME.id,nm(ME)),team,reports,yearly,admin}[tab]())}catch(e){$('#m').innerHTML=`<div class="err">${esc(e.message)}</div>`}
 }
 
 // ---- One person's entries + audit history (own, or a manager correcting on their behalf) ----
@@ -136,6 +140,49 @@ async function reports(){
   <div class="card tbl"><h3>Remaining hours by person</h3><table><tr><th>Name</th><th>Remaining today</th><th>Upcoming booked</th><th>Left after booked time off</th></tr>${r.people.map(p=>`<tr><td>${esc(p.name)}</td><td>${fmt(p.bal_today)}h</td><td class="t">${fmt(p.upcoming)}h</td><td><b class="${p.balance<0?'t':''}">${fmt(p.balance)}h</b></td></tr>`).join('')}</table></div>`:''}`;
 }
 
+// ---- Yearly report (per person or per team): on screen, CSV download, or print/save as PDF ----
+let ysc=null,yyr=new Date().getFullYear(),YR=null;
+const scopeOpts=(ts,sel)=>`<option value="u:${ME.id}" ${sel==='u:'+ME.id?'selected':''}>Me</option>`+ts.map(t=>`<optgroup label="${esc(t.name)}"><option value="t:${t.id}" ${sel==='t:'+t.id?'selected':''}>Whole team</option>`+t.members.filter(m=>m.id!==ME.id).map(m=>`<option value="u:${m.id}" ${sel==='u:'+m.id?'selected':''}>${esc(nm(m))}</option>`).join('')+'</optgroup>').join('');
+async function yearly(){
+  const ts=await api('GET','/api/teams');if(!ysc)ysc='u:'+ME.id;
+  const [k,id]=ysc.split(':'),r=YR=await api('GET',`/api/reports/yearly?year=${yyr}&${k==='t'?'team_id':'user_id'}=${id}&today=${today()}`);
+  const y0=2026,y1=Math.max(y0,new Date().getFullYear())+2,curYM=today().slice(0,7),team=r.scope.type==='team';
+  const ms=r.months.map(m=>({m:m.m,earned:m.earned,taken:m.taken,balance:m.closing,future:m.m>curYM}));
+  const T=r.total;
+  $('#m').innerHTML=`<div class="card noprint"><div style="display:flex;gap:10px;flex-wrap:wrap;align-items:end">
+   <label>Report for<select onchange="ysc=this.value;render()">${scopeOpts(ts,ysc)}</select></label>
+   <label>Year<select onchange="yyr=+this.value;render()">${Array.from({length:y1-y0+1},(_,i)=>y0+i).map(y=>`<option ${y===yyr?'selected':''}>${y}</option>`).join('')}</select></label>
+   <button class="p" onclick="csvYear()">Download CSV</button><button onclick="window.print()">Print / save as PDF</button></div></div>
+  <div class="card">${logoImg(40)} <h2 style="margin:4px 0 0">${esc(BR.name)}: yearly TOIL report ${r.year}</h2><div class="mu">${esc(r.scope.name)} · generated ${esc(new Date(r.generated).toLocaleString())}</div></div>
+  <div class="grid"><div class="card"><div class="mu">Opening balance (1 Jan)</div><div class="bal ${T.opening<0?'t':''}">${fmt(T.opening)}h</div></div>
+   <div class="card"><div class="mu">Earned in ${r.year}</div><div class="bal e">${fmt(T.earned)}h</div></div>
+   <div class="card"><div class="mu">Taken in ${r.year}</div><div class="bal t">${fmt(T.taken)}h</div>${T.booked?`<div class="mu">of which ${fmt(T.booked)}h booked for the future</div>`:''}</div>
+   <div class="card"><div class="mu">Closing balance (31 Dec)</div><div class="bal ${T.closing<0?'t':''}">${fmt(T.closing)}h</div><div class="mu">includes booked time off</div></div></div>
+  <div class="card"><h3>Earned vs taken per month <span class="mu">(<span class="e">■</span> earned <span class="t">■</span> taken · faded = upcoming)</span></h3>${barsM(ms)}</div>
+  <div class="card"><h3>Remaining hours at the end of each month <span class="mu">(hollow = upcoming, red = below zero)</span></h3>${lineB(ms)}</div>
+  <div class="card tbl"><h3>Month by month</h3><table><tr><th>Month</th><th>Earned</th><th>Taken</th><th>Remaining at month end</th></tr>${r.months.map(m=>`<tr><td>${m.m}${m.m>curYM?' <span class="mu">(upcoming)</span>':''}</td><td class="e">${fmt(m.earned)}h</td><td class="t">${fmt(m.taken)}h</td><td><b class="${m.closing<0?'t':''}">${fmt(m.closing)}h</b></td></tr>`).join('')}</table></div>
+  ${team?`<div class="card tbl"><h3>By person</h3><table><tr><th>Name</th><th>Opening (1 Jan)</th><th>Earned</th><th>Taken</th><th>Booked ahead</th><th>Closing (31 Dec)</th></tr>${r.people.map(p=>`<tr><td>${esc(p.name)}</td><td>${fmt(p.opening)}h</td><td class="e">${fmt(p.earned)}h</td><td class="t">${fmt(p.taken)}h</td><td>${fmt(p.booked)}h</td><td><b class="${p.closing<0?'t':''}">${fmt(p.closing)}h</b></td></tr>`).join('')||'<tr><td colspan="6" class="mu">No members</td></tr>'}</table></div>`:''}
+  <div class="card tbl"><h3>All entries in ${r.year}</h3><table><tr><th>Date</th>${team?'<th>Person</th>':''}<th>Type</th><th>Hours</th><th>Reason</th><th>Status</th></tr>`+
+  (r.entries.map(e=>`<tr><td>${e.date}</td>${team?`<td>${esc(e.person)}</td>`:''}<td class="${e.type==='earned'?'e':'t'}">${e.type}</td><td>${fmt(e.hours)}</td><td>${esc(e.reason)}</td><td class="mu">${e.upcoming?'Upcoming':''}</td></tr>`).join('')||`<tr><td colspan="6" class="mu">No entries in ${r.year}</td></tr>`)+
+  `</table>${r.truncated?'<div class="err">Showing the first 20,000 entries only.</div>':''}</div>`;
+}
+// CSV: text cells starting with = + - @ are prefixed with ' so spreadsheets cannot run them as formulas (names and reasons are user-entered)
+const csvT=v=>{let s=String(v??'');if(/^[=+\-@\t\r]/.test(s))s="'"+s;return /[",\r\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s};
+const csvN=v=>String(+v);
+function csvYear(){const r=YR,team=r.scope.type==='team',L=[];
+  L.push([csvT(BR.name+': yearly TOIL report')],['Report for',csvT(r.scope.name)],['Year',r.year],['Generated',csvT(r.generated)],[]);
+  L.push(['Summary'],['Person','Opening balance (1 Jan)','Earned','Taken','Booked ahead','Closing balance (31 Dec)']);
+  r.people.forEach(p=>L.push([csvT(p.name),csvN(p.opening),csvN(p.earned),csvN(p.taken),csvN(p.booked),csvN(p.closing)]));
+  if(team)L.push(['Total',csvN(r.total.opening),csvN(r.total.earned),csvN(r.total.taken),csvN(r.total.booked),csvN(r.total.closing)]);
+  L.push([],['Month by month'],['Month','Earned','Taken','Remaining at month end']);
+  r.months.forEach(m=>L.push([m.m,csvN(m.earned),csvN(m.taken),csvN(m.closing)]));
+  L.push([],['Entries'],['Date','Person','Type','Hours','Reason','Status']);
+  r.entries.forEach(e=>L.push([e.date,csvT(e.person),e.type,csvN(e.hours),csvT(e.reason),e.upcoming?'Upcoming':'']));
+  const blob=new Blob(['\ufeff'+L.map(x=>x.join(',')).join('\r\n')],{type:'text/csv;charset=utf-8'});
+  const a=document.createElement('a');a.href=URL.createObjectURL(blob);
+  a.download=`toil-yearly-${r.scope.name.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'')||'report'}-${r.year}.csv`;
+  document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+
 // ---- Admin: teams and users ----
 const LV={member:'Teammate',lead:'Team lead',director:'Director',admin:'Admin'};
 const userForm=(u,ts)=>`<form onsubmit="${u?`saveUser(event,${u.id})`:'addUser(event)'}">
@@ -148,18 +195,31 @@ const userForm=(u,ts)=>`<form onsubmit="${u?`saveUser(event,${u.id})`:'addUser(e
   <div class="w"><button class="p">${u?'Save':'Add user'}</button> ${u?'<button type="button" onclick="eu=null;render()">Cancel</button>':''}</div></form>`;
 const lvl=ev=>({name:ev.target.elements.uname.value,level:ev.target.level.value,team_ids:[...ev.target.querySelectorAll('input[name=t]:checked')].map(c=>+c.value)});
 async function admin(){
-  const [u,ts,st]=await Promise.all([api('GET','/api/users'),api('GET','/api/teams'),api('GET','/api/settings')]);const e=u.find(x=>x.id===eu);window._ts=ts;
+  const [u,ts,st,lg]=await Promise.all([api('GET','/api/users'),api('GET','/api/teams'),api('GET','/api/settings'),api('GET','/api/admin-log')]);const e=u.find(x=>x.id===eu);window._ts=ts;
   $('#m').innerHTML=`<div class="card"><h3>Settings</h3><label style="flex-direction:row;align-items:center;gap:8px;color:var(--tx);font-size:15px"><input type="checkbox" ${st.allow_negative?'checked':''} onchange="act('PUT','/api/settings',{allow_negative:this.checked})"> Allow negative balances</label>
   <div class="mu" style="margin-top:6px">When off, nobody can take time off (or make a change) that would push their balance below zero. People already below zero can still add earned time or remove time off to recover.</div></div>
+  <div class="card"><h3>Branding</h3><form onsubmit="saveName(event)"><label class="w">Application name (login screen, header and browser tab)<input name="appname" maxlength="60" value="${esc(BR.name)}" placeholder="TOIL Tracker"></label><button class="p">Save name</button></form>
+  <div class="row"><div class="mu" style="font-size:12px;margin-bottom:4px">Logo: PNG, JPEG or WebP, up to 512 KB. A transparent PNG about 64 px high works well.</div>
+  ${BR.logo?`<img src="${esc(BR.logo)}" alt="Current logo" style="max-height:64px;max-width:256px;display:block;margin:8px 0">`:'<div class="mu" style="margin:6px 0">No logo set</div>'}
+  <input type="file" id="logofile" accept="image/png,image/jpeg,image/webp"> <button class="p" onclick="uploadLogo()">Upload</button> ${BR.logo?'<button class="d" onclick="removeLogo()">Remove logo</button>':''}</div></div>
   <div class="card"><h3>Teams</h3><form onsubmit="newTeam(event)"><label class="w">New team name<input name="name" required></label><button class="p">Create team</button></form><div class="err">${esc(err)}</div>
   <div class="tbl"><table>`+(ts.map(t=>`<tr><td><b>${esc(t.name)}</b></td><td class="mu">${t.members.length} teammate(s) · managers: ${t.managers.map(m=>esc(nm(m))+' ('+m.title+')').join(', ')||'none'}</td>
    <td><button class="d" onclick="delTeam(${t.id})">Delete</button></td></tr>`).join('')||'<tr><td class="mu">No teams yet</td></tr>')+`</table></div></div>
   <div class="card"><h3>${e?'Edit '+esc(nm(e)):'Add user'}</h3>${userForm(e,ts)}</div>
   <div class="card tbl"><h3>Users</h3><table><tr><th>User</th><th>Role</th><th>Teams</th><th></th></tr>`+u.map(x=>`<tr><td>${esc(x.name||'')}<div class="mu">${esc(x.email)}</div></td><td>${LV[x.level]}</td>
   <td>${x.level==='admin'?'<span class="mu">All teams</span>':x.teams.map(t=>`<span class="chip">${esc(t.name)}</span>`).join('')||'<span class="mu">none</span>'}</td>
-  <td><button onclick="eu=${x.id};scrollTo(0,0);render()">Edit</button> <button onclick="resetPw(${x.id})">${x.has_password?'Reset':'Set'} password</button> ${x.id===ME.id?'':`<button class="d" onclick="if(confirm('Remove this user? Their history is kept.'))act('DELETE','/api/users/${x.id}')">Remove</button>`}</td></tr>`).join('')+'</table></div>';
+  <td><button onclick="eu=${x.id};scrollTo(0,0);render()">Edit</button> <button onclick="resetPw(${x.id})">${x.has_password?'Reset':'Set'} password</button> ${x.has_entra?`<button onclick="if(confirm('Unlink this person\u2019s Microsoft account? The next Microsoft sign-in will link whichever account uses their email.'))act('POST','/api/users/${x.id}/unlink-entra')">Unlink Microsoft</button>`:''} ${x.id===ME.id?'':`<button class="d" onclick="if(confirm('Remove this user? Their history is kept.'))act('DELETE','/api/users/${x.id}')">Remove</button>`}</td></tr>`).join('')+`</table></div><div class="card tbl"><h3>Admin activity</h3><table><tr><th>When (UTC)</th><th>By</th><th>Action</th><th>Details</th></tr>`+
+  (lg.map(l=>`<tr><td>${l.at}</td><td>${esc(l.actor_name||l.actor_email)}</td><td>${esc(ALBL[l.action]||l.action)}</td><td>${esc(adet(l.detail))}</td></tr>`).join('')||'<tr><td colspan="4" class="mu">Nothing recorded yet</td></tr>')+'</table></div>';
 }
+const ALBL={'user.add':'Added user','user.update':'Changed user','user.remove':'Removed user','user.password_reset':'Reset password','user.password_change':'Changed own password','user.entra_unlink':'Unlinked Microsoft account','user.entra_linked':'Microsoft account linked','team.create':'Created team','team.delete':'Deleted team','settings.change':'Changed setting','branding.name':'Changed application name','branding.logo_upload':'Uploaded logo','branding.logo_remove':'Removed logo'};
+const adet=d=>{try{return Object.entries(JSON.parse(d)).map(([k,v])=>k.replace('_',' ')+': '+(Array.isArray(v)?(v.join(', ')||'none'):v)).join(' · ')}catch{return ''}};
 function delTeam(id){const t=window._ts.find(x=>x.id===id);if(t&&confirm('Delete team '+t.name+'? Entries are kept.'))act('DELETE','/api/teams/'+id)}
+async function saveName(ev){ev.preventDefault();try{await api('PUT','/api/branding/name',{name:ev.target.elements.appname.value});await loadBrand()}catch(e){alert(e.message)}render()}
+async function uploadLogo(){const f=$('#logofile').files[0];if(!f){alert('Choose an image first');return}
+  if(f.size>512*1024){alert('That image is larger than 512 KB');return}
+  try{const r=await fetch('/api/branding/logo',{method:'PUT',headers:{'Content-Type':f.type||'application/octet-stream'},body:f});
+    const j=await r.json().catch(()=>({}));if(!r.ok)throw new Error(j.error||r.statusText);await loadBrand()}catch(e){alert(e.message)}render()}
+async function removeLogo(){if(!confirm('Remove the logo?'))return;try{await api('DELETE','/api/branding/logo');await loadBrand()}catch(e){alert(e.message)}render()}
 async function newTeam(ev){ev.preventDefault();err='';try{await api('POST','/api/teams',Object.fromEntries(new FormData(ev.target)))}catch(e){err=e.message}render()}
 async function addUser(ev){ev.preventDefault();err='';const f=ev.target;
   try{await api('POST','/api/users',{email:f.email.value,password:f.password.value,...lvl(ev)})}catch(e){err=e.message}render()}
